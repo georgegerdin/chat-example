@@ -1,79 +1,13 @@
 #include "chatserver.h"
+#include "packet.hh"
 #include "format.hh"
 #include <iostream>
-#include <deque>
-
-class ChatSession : public std::enable_shared_from_this<ChatSession> {
-public:
-    ChatSession(boost::asio::ip::tcp::socket socket, ChatServer& server)
-        : socket_(std::move(socket)), server_(server) {
-        dbgln("[SERVER] New chat session created");
-    }
-
-    void start() {
-        dbgln("[SERVER] Starting chat session");
-        do_read();
-    }
-
-    void deliver(const std::string& message) {
-        bool write_in_progress = !write_msgs_.empty();
-        write_msgs_.push_back(message);
-        dbgln("[SERVER] Message queued for delivery: {}", message);
-        if (!write_in_progress) {
-            do_write();
-        }
-    }
-
-    void stop() {
-        dbgln("[SERVER] Stopping chat session");
-        socket_.close();
-    }
-
-private:
-    void do_read() {
-        auto self(shared_from_this());
-        boost::asio::async_read_until(socket_, boost::asio::dynamic_buffer(read_msg_), "\n",
-                                      [this, self](boost::system::error_code ec, std::size_t /*length*/) {
-                                          if (!ec) {
-                                              std::string msg(read_msg_.substr(0, read_msg_.find("\n")));
-                                              read_msg_.erase(0, read_msg_.find("\n") + 1);
-                                              dbgln("[SERVER] Raw message received in ChatSession: {}", msg);
-                                              server_.handle_message(self, msg);
-                                              do_read();
-                                          } else {
-                                              dbgln("[SERVER] Read error in ChatSession: {}", ec.message());
-                                          }
-                                      });
-    }
-
-    void do_write() {
-        auto self(shared_from_this());
-        boost::asio::async_write(socket_,
-                                 boost::asio::buffer(write_msgs_.front()),
-                                 [this, self](boost::system::error_code ec, std::size_t /*length*/) {
-                                     if (!ec) {
-                                         dbgln("[SERVER] Message sent successfully: {}", write_msgs_.front());
-                                         write_msgs_.pop_front();
-                                         if (!write_msgs_.empty()) {
-                                             do_write();
-                                         }
-                                     } else {
-                                         dbgln("[SERVER] Write error: {}", ec.message());
-                                         socket_.close();
-                                     }
-                                 });
-    }
-
-    boost::asio::ip::tcp::socket socket_;
-    ChatServer& server_;
-    std::string read_msg_;
-    std::deque<std::string> write_msgs_;
-};
+#include <algorithm>
 
 ChatServer::ChatServer(boost::asio::io_context& io_context, short port)
     : io_context_(io_context),
-    acceptor_(io_context, boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port)) {
-    user_credentials_["Alice"] = "password123";
+    acceptor_(io_context, boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port)),
+    stop_flag_(false) {
     dbgln("[SERVER] ChatServer constructor");
     do_accept();
     dbgln("[SERVER] Server started on port {}", port);
@@ -83,11 +17,27 @@ void ChatServer::stop() {
     dbgln("[SERVER] Stopping server...");
     stop_flag_ = true;
     acceptor_.close();
-    for (auto& client : clients_) {
-        client.first->stop();
+    dbgln("[SERVER] Acceptor closed");
+
+    // Move this to protect us from lifetime problems
+    std::set<std::shared_ptr<ChatSession>> participants = std::move(participants_);
+    participants_.clear();
+
+    dbgln("[SERVER] Stopping participant sessions");
+    for (auto& participant : participants) {
+        boost::asio::post(io_context_, [&participant] {
+            dbgln("[SERVER] Stopping participant {}", participant->get_username());
+            participant->stop();
+        });
     }
-    clients_.clear();
+
+    io_context_.run();
+
+    dbgln("[SERVER] All participant sessions stopped");
+    participants.clear();
+    dbgln("[SERVER] Participants cleared");
     dump_accounts();
+    dbgln("[SERVER] Server stop completed");
 }
 
 void ChatServer::do_accept() {
@@ -96,7 +46,7 @@ void ChatServer::do_accept() {
             if (!ec && !stop_flag_) {
                 dbgln("[SERVER] New connection accepted");
                 auto session = std::make_shared<ChatSession>(std::move(socket), *this);
-                clients_[session] = "Anonymous";
+                participants_.insert(session);
                 session->start();
                 do_accept();
             } else if (ec) {
@@ -105,23 +55,109 @@ void ChatServer::do_accept() {
         });
 }
 
-bool ChatServer::authenticate_user(const std::string& username, const std::string& password) {
-    dbgln("[SERVER] Authenticating user: {}", username);
-    auto it = user_credentials_.find(username);
-    if (it != user_credentials_.end()) {
-        return it->second == password;
+void ChatServer::handle_packet(std::shared_ptr<ChatSession> sender, const std::vector<uint8_t>& packet_data) {
+    dbgln("[SERVER] Handling packet of size: {}", packet_data.size());
+    auto packet = createPacketFromData(packet_data);
+    if (!packet) {
+        dbgln("[SERVER] Received invalid packet from client");
+        return;
     }
+
+    dbgln("[SERVER] Received packet of type: {}", static_cast<int>(packet->getType()));
+
+    switch (packet->getType()) {
+    case PacketType::Login: {
+        auto login_packet = static_cast<LoginPacket*>(packet.get());
+        dbgln("[SERVER] Login attempt from user: {}", login_packet->getUsername());
+
+        bool success = authenticate_user(login_packet->getUsername(), login_packet->getPassword());
+        if (success) {
+            dbgln("[SERVER] Login successful for user: {}", login_packet->getUsername());
+            sender->set_username(login_packet->getUsername());
+            sender->deliver(LoginSuccessPacket());
+
+            // Notify other users about the new user
+            ChatMessagePacket system_msg("System", login_packet->getUsername() + " has joined the chat.");
+            broadcast(system_msg, sender);
+        } else {
+            dbgln("[SERVER] Login failed for user: {}", login_packet->getUsername());
+            sender->deliver(LoginFailedPacket());
+        }
+        break;
+    }
+    case PacketType::CreateUser: {
+        auto create_user_packet = static_cast<CreateUserPacket*>(packet.get());
+        dbgln("[SERVER] Account creation attempt for username: {}", create_user_packet->getUsername());
+
+        bool success = create_user(create_user_packet->getUsername(), create_user_packet->getPassword());
+        if (success) {
+            dbgln("[SERVER] Account created successfully for user: {}", create_user_packet->getUsername());
+            sender->deliver(AccountCreatedPacket());
+        } else {
+            dbgln("[SERVER] Account creation failed for user: {} (username already exists)", create_user_packet->getUsername());
+            sender->deliver(AccountExistsPacket());
+        }
+        break;
+    }
+    case PacketType::ChatMessage: {
+        auto chat_message_packet = static_cast<ChatMessagePacket*>(packet.get());
+        std::string sender_name = sender->get_username();
+
+        if (sender_name.empty()) {
+            dbgln("[SERVER] Received chat message from unauthenticated user");
+            sender->deliver(LoginFailedPacket());
+            return;
+        }
+
+        dbgln("[SERVER] Received chat message from {}: {}", sender_name, chat_message_packet->getMessage());
+
+        // Create a new packet with the sender's name
+        ChatMessagePacket broadcast_packet(sender_name, chat_message_packet->getMessage());
+        broadcast(broadcast_packet, sender);
+        break;
+    }
+    case PacketType::LoginSuccess:
+    case PacketType::LoginFailed:
+    case PacketType::AccountCreated:
+    case PacketType::AccountExists:
+        dbgln("[SERVER] Received unexpected packet type from client: {}", static_cast<int>(packet->getType()));
+        break;
+    default:
+        dbgln("[SERVER] Received unknown packet type from client: {}", static_cast<int>(packet->getType()));
+        break;
+    }
+}
+
+void ChatServer::broadcast(const Packet& packet, std::shared_ptr<ChatSession> sender) {
+    for (auto& participant : participants_) {
+        if (participant != sender) {
+            participant->deliver(packet);
+        }
+    }
+}
+
+bool ChatServer::authenticate_user(const std::string& username, const std::string& password) {
+    dbgln("[SERVER] Attempting to authenticate user: {}", username);
+    auto it = user_credentials_.find(username);
+    if (it != user_credentials_.end() && it->second == password) {
+        dbgln("[SERVER] Authentication successful for user: {}", username);
+        return true;
+    }
+    dbgln("[SERVER] Authentication failed for user: {}", username);
     return false;
 }
 
 bool ChatServer::create_user(const std::string& username, const std::string& password) {
-    dbgln("[SERVER] Creating user: {}", username);
+    dbgln("[SERVER] Attempting to create user: {}", username);
     if (user_credentials_.find(username) == user_credentials_.end()) {
         user_credentials_[username] = password;
+        dbgln("[SERVER] User created successfully: {}", username);
         return true;
     }
+    dbgln("[SERVER] User creation failed: username already exists: {}", username);
     return false;
 }
+
 
 void ChatServer::dump_accounts() const {
     dbgln("[SERVER] Available accounts:");
@@ -130,71 +166,90 @@ void ChatServer::dump_accounts() const {
     }
 }
 
-void ChatServer::disconnect_client(std::shared_ptr<ChatSession> client, const std::string& reason) {
-    dbgln("[SERVER] Disconnecting client. Reason: {}", reason);
-    client->deliver(reason + "\n");
-    client->stop();
-    clients_.erase(client);
+void ChatServer::leave(std::shared_ptr<ChatSession> participant) {
+    participants_.erase(participant);
+    std::string username = participant->get_username();
+    if (!username.empty()) {
+        ChatMessagePacket system_msg("System", username + " has left the chat.");
+        broadcast(system_msg, participant);
+    }
 }
 
-void ChatServer::handle_message(std::shared_ptr<ChatSession> sender, const std::string& message) {
-    dbgln("[SERVER] Handling message: '{}' from client", message);
+ChatSession::ChatSession(boost::asio::ip::tcp::socket socket, ChatServer& server)
+    : socket_(std::move(socket)), server_(server) {
+    dbgln("[SERVER] New chat session created");
+}
 
-    if (message.empty()) {
-        dbgln("[SERVER] Ignored empty message");
-        return;
+void ChatSession::start() {
+    dbgln("[SERVER] Starting chat session");
+    do_read_header();
+}
+
+void ChatSession::deliver(const Packet& packet) {
+    bool write_in_progress = !write_msgs_.empty();
+    write_msgs_.push_back(preparePacketForSending(packet));
+    if (!write_in_progress) {
+        do_write();
     }
+}
 
-    if (message.substr(0, 6) == "LOGIN:") {
-        std::string credentials = message.substr(6);
-        size_t delimiter = credentials.find(':');
-        if (delimiter != std::string::npos) {
-            std::string username = credentials.substr(0, delimiter);
-            std::string password = credentials.substr(delimiter + 1);
-            if (authenticate_user(username, password)) {
-                clients_[sender] = username;
-                sender->deliver("LOGIN_SUCCESS\n");
-                dbgln("[SERVER] Login successful for user: {}", username);
-            } else {
-                disconnect_client(sender, "LOGIN_FAILED");
-                dbgln("[SERVER] Login failed for user: {}", username);
-            }
-        }
-    } else if (message.substr(0, 7) == "CREATE:") {
-        std::string credentials = message.substr(7);
-        size_t delimiter = credentials.find(':');
-        if (delimiter != std::string::npos) {
-            std::string username = credentials.substr(0, delimiter);
-            std::string password = credentials.substr(delimiter + 1);
-            if (create_user(username, password)) {
-                disconnect_client(sender, "ACCOUNT_CREATED");
-                dbgln("[SERVER] Account created successfully for user: {}", username);
-            } else {
-                disconnect_client(sender, "ACCOUNT_EXISTS");
-                dbgln("[SERVER] Account creation failed for user: {} (already exists)", username);
-            }
-        }
-    } else if (message.substr(0, 5) == "NAME:") {
-        std::string new_name = message.substr(5);
-        clients_[sender] = new_name;
-        dbgln("[SERVER] Client set name to: {}", new_name);
-    } else {
-        // This is a regular chat message
-        dbgln("[SERVER] Received a regular chat message");
-        std::string sender_name = clients_[sender];
-        dbgln("[SERVER] Sender: {}", sender_name);
-        std::string full_message = sender_name + ": " + message;
-        dbgln("[SERVER] Full message to broadcast: {}", full_message);
+void ChatSession::stop() {
+    socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both);
+    socket_.close();
+}
 
-        int broadcast_count = 0;
-        for (auto& client : clients_) {
-            if (client.first != sender) {
-                dbgln("[SERVER] Attempting to deliver message to client: {}", client.second);
-                client.first->deliver(full_message + "\n");
-                broadcast_count++;
-            }
-        }
+void ChatSession::do_read_header() {
+    auto self(shared_from_this());
+    boost::asio::async_read(socket_, boost::asio::buffer(&next_packet_size_, sizeof(uint32_t)),
+                            [this, self](boost::system::error_code ec, std::size_t /*length*/) {
+                                if (!ec) {
+                                    if (next_packet_size_ > 1024 * 1024) {  // Limit packet size to 1MB
+                                        dbgln("[SERVER] Received packet size too large: {}", next_packet_size_);
+                                        server_.leave(shared_from_this());
+                                        return;
+                                    }
+                                    read_msg_.resize(next_packet_size_);
+                                    do_read_body();
+                                } else {
+                                    server_.leave(shared_from_this());
+                                }
+                            });
+}
 
-        dbgln("[SERVER] Broadcasted message to {} clients", broadcast_count);
-    }
+void ChatSession::do_read_body() {
+    auto self(shared_from_this());
+    boost::asio::async_read(socket_, boost::asio::buffer(read_msg_),
+                            [this, self](boost::system::error_code ec, std::size_t length) {
+                                if (!ec) {
+                                    dbgln("[SERVER] Received packet body of size: {}", length);
+                                    server_.handle_packet(self, read_msg_);
+                                    do_read_header();
+                                } else {
+                                    server_.leave(shared_from_this());
+                                }
+                            });
+}
+
+void ChatSession::do_write() {
+    auto self(shared_from_this());
+    boost::asio::async_write(socket_,
+                             boost::asio::buffer(write_msgs_.front()),
+                             [this, self](boost::system::error_code ec, std::size_t /*length*/) {
+                                 if (!ec) {
+                                     write_msgs_.pop_front();
+                                     if (!write_msgs_.empty()) {
+                                         do_write();
+                                     }
+                                 } else {
+                                     server_.leave(shared_from_this());
+                                 }
+                             });
+}
+
+void ChatSession::set_username(const std::string& username) {
+    username_ = username;
+}
+
+const std::string& ChatSession::get_username() const {
+    return username_;
 }

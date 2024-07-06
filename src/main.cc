@@ -1,4 +1,3 @@
-//main.cc
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -6,13 +5,8 @@
 #include <boost/asio.hpp>
 #include "chatserver.h"
 #include "chatclient.h"
-#include <queue>
-#include <mutex>
-#include <condition_variable>
 #include <atomic>
 #include "format.hh"
-#include "signal.hh"
-
 
 void run_server(short port, std::atomic<bool>& stop_flag) {
     try {
@@ -24,6 +18,7 @@ void run_server(short port, std::atomic<bool>& stop_flag) {
         std::thread io_thread([&io_context]() {
             dbgln("[MAIN] Server IO thread started");
             io_context.run();
+            dbgln("[MAIN] Server IO thread ended");
         });
 
         while (!stop_flag) {
@@ -44,159 +39,118 @@ void run_server(short port, std::atomic<bool>& stop_flag) {
 class ClientRunner {
 public:
     ClientRunner(const std::string& name, const std::string& host, const std::string& port)
-        : name_(name), host_(host), port_(port), stop_flag_(false) {}
+        : name_(name), host_(host), port_(port)
+    {
+        SendMessage.connect([this](auto message) {
+            send_message(message);
+        }, &io_context_);
+        Stop.connect([this] {
+            io_context_.stop();
+        }, &io_context_);
+    }
 
     void start() {
         thread_ = std::thread(&ClientRunner::run, this);
     }
 
     void stop() {
-        stop_flag_ = true;
+        Stop.emit();
         if (thread_.joinable()) {
             thread_.join();
         }
     }
 
-    Signal<const std::string&> on_message_received;
-    Signal<> on_disconnected;
-    Signal<> on_connected;
-    Signal<> on_login_success;
-    Signal<> on_login_failure;
-    Signal<> on_account_created;
-    Signal<const std::string&> on_send_message;
+    Signal<const std::string&> SendMessage;
+    Signal<> Stop;
 
+    std::string name() const {return name_;}
+private:
     void send_message(const std::string& message) {
-        on_send_message.emit(message);
+        if (client_ && client_->is_logged_in()) {
+            client_->SendMessage.emit(message);
+        }
     }
 
-private:
     void run() {
         try {
-            bool needs_account = true;
-            while (!stop_flag_) {
-                dbgln("[CLIENT] {}: Attempting to connect to server...", name_);
-                boost::asio::io_context io_context;
-                on_send_message.connect([this](const std::string& message) {
-                    message_queue_.push(message);
-                }, &io_context);
-                ChatClient client(io_context, name_);
+            auto work_guard = boost::asio::make_work_guard(io_context_);
 
-                client.set_disconnected_callback([this]() {
-                    on_disconnected.emit();
-                    dbgln("[CLIENT] {}: Disconnected from server", name_);
-                });
+            client_ = std::make_unique<ChatClient>(name_);
+            client_->start();
 
+            client_->Connect.emit(host_, port_);
 
-                if (!client.connect(host_, port_)) {
-                    dbgln("[CLIENT] {}: Failed to connect. Retrying in 2 seconds...", name_);
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
-                    continue;
-                }
+            std::string username = name_;
+            std::string password = "password123";
 
-                on_connected.emit();
-                dbgln("[CLIENT] {}: Connected to server.", name_);
+            client_->on_connected.connect([this, &username, &password] {
+                dbgln("[CLIENT {}] Attempting to create user", name_);
+                client_->CreateUser.emit(username, password);
+            }, &io_context_);
 
-                std::thread io_thread([&io_context, this]() {
-                    dbgln("[CLIENT] {}: IO thread started", name_);
-                    io_context.run();
-                });
+            client_->on_create_account_response.connect([this, &username, &password](bool response)
+            {
+                dbgln("[CLIENT {}] Attempting to log in", name_);
+                client_->Login.emit(username, password);
+            }, &io_context_);
 
-                std::string username = name_;
-                std::string password = "password123";
-
-                if (needs_account) {
-                    dbgln("[CLIENT] {}: Attempting to create a new account.", name_);
-                    bool create_success = client.create_user(username, password);
-                    if (create_success) {
-                        on_account_created.emit();
-                        dbgln("[CLIENT] {}: Account created. Disconnecting to log in.", name_);
-                        needs_account = false;
-                    } else {
-                        dbgln("[CLIENT] {}: Failed to create an account. Assuming it already exists.", name_);
-                        needs_account = false;
-                    }
+            client_->on_login_response.connect([this](bool response)
+            {
+                if(response) {
+                    dbgln("[CLIENT {}] Logged in successfully", name_);
                 } else {
-                    dbgln("[CLIENT] {}: Attempting to log in.", name_);
-                    bool login_success = client.login(username, password);
-                    if (login_success) {
-                        on_login_success.emit();
-                        dbgln("[CLIENT] {}: Successfully logged in.", name_);
-
-                        while (!stop_flag_ && client.is_open()) {
-                            std::string message;
-                            if (try_pop_message(message)) {
-                                dbgln("[CLIENT] {}: Sending message: {}", name_, message);
-                                client.queue_message(message);
-                            }
-                            client.process_write_queue();
-                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                        }
-                    } else {
-                        on_login_failure.emit();
-                        dbgln("[CLIENT] {}: Login failed.", name_);
-                    }
+                    dbgln("[CLIENT {}] Failed to log in", name_);
                 }
+            }, &io_context_);
 
-                client.close();
-                io_context.stop();
-                io_thread.join();
+            client_->on_message_received.connect([this](const std::string& sender, const std::string& message) {
+                dbgln("[CLIENT {}] Received: {} - {}", name_, sender, message);
+            }, &io_context_);
 
-                if (!stop_flag_) {
-                    dbgln("[CLIENT] {}: Disconnected. Reconnecting in 2 seconds...", name_);
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
-                }
-            }
+            client_->on_disconnected.connect([this] {
+                dbgln("[CLIENT {}] Disconnected", name_);
+                io_context_.stop();
+            }, &io_context_);
+
+            io_context_.run();
+
+            dbgln("[CLIENT {}] Stopping client", name_);
+            client_->stop();
+            dbgln("[CLIENT {}] Client stopped", name_);
         }
         catch (std::exception& e) {
-            dbgln("[CLIENT] {} exception: {}", name_, e.what());
+            dbgln("[CLIENT {}] Exception: {}", name_, e.what());
         }
-        dbgln("[CLIENT] {} thread ended", name_);
-    }
-
-    bool try_pop_message(std::string& message) {
-        if (message_queue_.empty()) {
-            return false;
-        }
-        message = std::move(message_queue_.front());
-        message_queue_.pop();
-        return true;
     }
 
     std::string name_;
     std::string host_;
     std::string port_;
-    std::atomic<bool> stop_flag_;
+    boost::asio::io_context io_context_;
     std::thread thread_;
-    std::queue<std::string> message_queue_;
+    std::unique_ptr<ChatClient> client_;
 };
 
 int main() {
     std::atomic<bool> stop_flag(false);
     dbgln("[MAIN] Starting chat application");
-    std::thread server_thread(run_server, 12345, std::ref(stop_flag));
+
+    short server_port = 12345;
+    std::thread server_thread(run_server, server_port, std::ref(stop_flag));
 
     // Allow some time for the server to start
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    ClientRunner alice("Alice", "localhost", "12345");
-    ClientRunner bob("Bob", "localhost", "12345");
-    ClientRunner charlie("Charlie", "localhost", "12345");
-
-    // Set up signal handlers
-    alice.on_message_received.connect([](const std::string& msg) {
-        dbgln("[MAIN] Alice received: {}", msg);
-    });
-    bob.on_message_received.connect([](const std::string& msg) {
-        dbgln("[MAIN] Bob received: {}", msg);
-    });
-    charlie.on_message_received.connect([](const std::string& msg) {
-        dbgln("[MAIN] Charlie received: {}", msg);
-    });
+    std::vector<std::unique_ptr<ClientRunner>> clients;
+    clients.push_back(std::make_unique<ClientRunner>("Alice", "localhost", std::to_string(server_port)));
+    clients.push_back(std::make_unique<ClientRunner>("Bob", "localhost", std::to_string(server_port)));
+    clients.push_back(std::make_unique<ClientRunner>("Charlie", "localhost", std::to_string(server_port)));
 
     // Start clients
-    alice.start();
-    bob.start();
-    charlie.start();
+    for (auto& client : clients) {
+        dbgln("[MAIN] Starting client: {}", client->name());
+        client->start();
+    }
 
     // Wait for clients to connect and log in
     dbgln("[MAIN] Waiting for clients to connect and log in");
@@ -204,17 +158,18 @@ int main() {
 
     // Send messages
     dbgln("[MAIN] Sending messages");
-    alice.send_message("Hello, everyone!\n");
-    bob.send_message("Hi Alice!\n");
-    charlie.send_message("Hey there!\n");
+    for (auto& client : clients) {
+        dbgln("[MAIN] Sending message from client: {}", client->name());
+        client->SendMessage.emit("Hello, everyone!");
+    }
 
     // Wait for messages to be processed
     std::this_thread::sleep_for(std::chrono::seconds(5));
 
     // Send more messages
-    alice.send_message("How are you all doing?\n");
-    bob.send_message("Great, thanks!\n");
-    charlie.send_message("Doing well, thanks for asking!\n");
+    clients[0]->SendMessage.emit("How are you all doing?");
+    clients[1]->SendMessage.emit("Great, thanks!");
+    clients[2]->SendMessage.emit("Doing well, thanks for asking!");
 
     // Wait for messages to be processed
     std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -223,9 +178,9 @@ int main() {
     dbgln("[MAIN] Closing clients and server");
     stop_flag = true;
 
-    alice.stop();
-    bob.stop();
-    charlie.stop();
+    for (auto& client : clients) {
+        client->stop();
+    }
 
     server_thread.join();
 
