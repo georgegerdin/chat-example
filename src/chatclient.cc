@@ -86,7 +86,7 @@ void ChatClient::close() {
 }
 
 void ChatClient::write(const Packet& packet) {
-    auto prepared_packet = preparePacketForSending(packet);
+    auto prepared_packet = Packet::preparePacketForSending(packet);
     dbgln("[CLIENT {}] Sending packet of type: {}", name_, static_cast<int>(packet.getType()));
     bool write_in_progress = !write_msgs_.empty();
     write_msgs_.push_back(std::move(prepared_packet));

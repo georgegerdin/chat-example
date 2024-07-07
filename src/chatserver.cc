@@ -187,7 +187,7 @@ void ChatSession::start() {
 
 void ChatSession::deliver(const Packet& packet) {
     bool write_in_progress = !write_msgs_.empty();
-    write_msgs_.push_back(preparePacketForSending(packet));
+    write_msgs_.push_back(Packet::preparePacketForSending(packet));
     if (!write_in_progress) {
         do_write();
     }

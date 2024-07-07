@@ -22,8 +22,25 @@ public:
     virtual ~Packet() = default;
 
     virtual PacketType getType() const = 0;
-    virtual std::vector<uint8_t> serialize() const = 0;
+    virtual size_t serialize(std::vector<uint8_t>& buffer) const = 0;
     virtual void deserialize(const std::vector<uint8_t>& data) = 0;
+
+    static inline std::vector<uint8_t> preparePacketForSending(const Packet& packet) {
+        std::vector<uint8_t> result;
+        result.reserve(1024);  // Reserve some space to avoid frequent reallocations
+
+        // Placeholder for packet size
+        writeToBuffer(result, static_cast<uint32_t>(0));
+
+        // Serialize the packet
+        size_t packetSize = packet.serialize(result);
+
+        // Write the actual packet size at the beginning
+        uint32_t size = static_cast<uint32_t>(packetSize);
+        std::memcpy(result.data(), &size, sizeof(uint32_t));
+
+        return result;
+    }
 
 protected:
     template<typename T>
@@ -64,12 +81,12 @@ public:
 
     PacketType getType() const override { return PacketType::Login; }
 
-    std::vector<uint8_t> serialize() const override {
-        std::vector<uint8_t> buffer;
+    size_t serialize(std::vector<uint8_t>& buffer) const override {
+        size_t initialSize = buffer.size();
         writeToBuffer(buffer, getType());
         writeString(buffer, username_);
         writeString(buffer, password_);
-        return buffer;
+        return buffer.size() - initialSize;
     }
 
     void deserialize(const std::vector<uint8_t>& data) override {
@@ -94,12 +111,12 @@ public:
 
     PacketType getType() const override { return PacketType::CreateUser; }
 
-    std::vector<uint8_t> serialize() const override {
-        std::vector<uint8_t> buffer;
+    size_t serialize(std::vector<uint8_t>& buffer) const override {
+        size_t initialSize = buffer.size();
         writeToBuffer(buffer, getType());
         writeString(buffer, username_);
         writeString(buffer, password_);
-        return buffer;
+        return buffer.size() - initialSize;
     }
 
     void deserialize(const std::vector<uint8_t>& data) override {
@@ -124,12 +141,12 @@ public:
 
     PacketType getType() const override { return PacketType::ChatMessage; }
 
-    std::vector<uint8_t> serialize() const override {
-        std::vector<uint8_t> buffer;
+    size_t serialize(std::vector<uint8_t>& buffer) const override {
+        size_t initialSize = buffer.size();
         writeToBuffer(buffer, getType());
         writeString(buffer, sender_);
         writeString(buffer, message_);
-        return buffer;
+        return buffer.size() - initialSize;
     }
 
     void deserialize(const std::vector<uint8_t>& data) override {
@@ -152,10 +169,10 @@ public:
 
     PacketType getType() const override { return PacketType::LoginSuccess; }
 
-    std::vector<uint8_t> serialize() const override {
-        std::vector<uint8_t> buffer;
+    size_t serialize(std::vector<uint8_t>& buffer) const override {
+        size_t initialSize = buffer.size();
         writeToBuffer(buffer, getType());
-        return buffer;
+        return buffer.size() - initialSize;
     }
 
     void deserialize(const std::vector<uint8_t>& data) override {
@@ -169,10 +186,10 @@ public:
 
     PacketType getType() const override { return PacketType::LoginFailed; }
 
-    std::vector<uint8_t> serialize() const override {
-        std::vector<uint8_t> buffer;
+    size_t serialize(std::vector<uint8_t>& buffer) const override {
+        size_t initialSize = buffer.size();
         writeToBuffer(buffer, getType());
-        return buffer;
+        return buffer.size() - initialSize;
     }
 
     void deserialize(const std::vector<uint8_t>& data) override {
@@ -186,10 +203,10 @@ public:
 
     PacketType getType() const override { return PacketType::AccountCreated; }
 
-    std::vector<uint8_t> serialize() const override {
-        std::vector<uint8_t> buffer;
+    size_t serialize(std::vector<uint8_t>& buffer) const override {
+        size_t initialSize = buffer.size();
         writeToBuffer(buffer, getType());
-        return buffer;
+        return buffer.size() - initialSize;
     }
 
     void deserialize(const std::vector<uint8_t>& data) override {
@@ -203,10 +220,10 @@ public:
 
     PacketType getType() const override { return PacketType::AccountExists; }
 
-    std::vector<uint8_t> serialize() const override {
-        std::vector<uint8_t> buffer;
+    size_t serialize(std::vector<uint8_t>& buffer) const override {
+        size_t initialSize = buffer.size();
         writeToBuffer(buffer, getType());
-        return buffer;
+        return buffer.size() - initialSize;
     }
 
     void deserialize(const std::vector<uint8_t>& data) override {
@@ -251,14 +268,4 @@ inline std::unique_ptr<Packet> createPacketFromData(const std::vector<uint8_t>& 
 
     packet->deserialize(data);
     return packet;
-}
-
-// Helper function to prepare a packet for sending
-inline std::vector<uint8_t> preparePacketForSending(const Packet& packet) {
-    std::vector<uint8_t> serialized = packet.serialize();
-    uint32_t size = static_cast<uint32_t>(serialized.size());
-    std::vector<uint8_t> result(sizeof(uint32_t) + serialized.size());
-    std::memcpy(result.data(), &size, sizeof(uint32_t));
-    std::memcpy(result.data() + sizeof(uint32_t), serialized.data(), serialized.size());
-    return result;
 }

@@ -4,4 +4,4 @@ add_executable(chat-example
     chatserver.cc
     format.cc
 )
-target_include_directories(chat-example INTERFACE ${CMAKE_SOURCE_DIR}/include PRIVATE ${CMAKE_SOURCE_DIR}/include/chat-example)
+target_include_directories(chat-example INTERFACE ${CMAKE_SOURCE_DIR}/include PRIVATE ${CMAKE_SOURCE_DIR}/include/chat_example)
