@@ -205,13 +205,13 @@ void ChatSession::do_read_header() {
                                 if (!ec) {
                                     if (next_packet_size_ > 1024 * 1024) {  // Limit packet size to 1MB
                                         dbgln("[SERVER] Received packet size too large: {}", next_packet_size_);
-                                        server_.leave(shared_from_this());
+                                        server_.leave(self);
                                         return;
                                     }
                                     read_msg_.resize(next_packet_size_);
                                     do_read_body();
                                 } else {
-                                    server_.leave(shared_from_this());
+                                    server_.leave(self);
                                 }
                             });
 }
@@ -225,7 +225,7 @@ void ChatSession::do_read_body() {
                                     server_.handle_packet(self, read_msg_);
                                     do_read_header();
                                 } else {
-                                    server_.leave(shared_from_this());
+                                    server_.leave(self);
                                 }
                             });
 }
@@ -241,7 +241,7 @@ void ChatSession::do_write() {
                                          do_write();
                                      }
                                  } else {
-                                     server_.leave(shared_from_this());
+                                     server_.leave(self);
                                  }
                              });
 }
