@@ -4,10 +4,7 @@
 #include <boost/asio.hpp>
 #include <string>
 #include <deque>
-#include <mutex>
 #include <atomic>
-#include <future>
-#include <functional>
 
 #include "packet.hh"
 #include "signal.hh"
@@ -38,7 +35,6 @@ private:
     bool is_open() const { return !closed_; }
     void login(const std::string& username, const std::string& password);
     void create_user(const std::string& username, const std::string& password);
-    void set_disconnected_callback(std::function<void()> callback);
     void send_message(const std::string& message);
 
     void do_read();

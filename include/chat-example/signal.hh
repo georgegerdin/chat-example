@@ -1,11 +1,8 @@
-//signal.hh
+// signal.hh
 #pragma once
 
 #include <boost/asio.hpp>
 #include <boost/signals2.hpp>
-#include <functional>
-#include <iostream>
-#include <thread>
 
 template <typename... Args>
 class Signal {
