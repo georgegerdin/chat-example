@@ -123,7 +123,11 @@ TEST_CASE("ChatServer tests") {
             std::string password = "pass" + std::to_string(i);
 
             clients[i]->send(CreateUserPacket(username, password));
-            clients[i]->receive();
+            // Server starts with sending messages about other users already logged in
+            auto response = clients[i]->receive();
+            while(response->getType() != PacketType::AccountCreated) {
+                response = clients[i]->receive();
+            }
 
             clients[i]->send(LoginPacket(username, password));
             clients[i]->receive();
