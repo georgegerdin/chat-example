@@ -9,7 +9,7 @@
 class TestClient {
 public:
     TestClient(boost::asio::io_context& io_context, short port)
-        : socket_(io_context), responses_() {
+        : socket_(io_context) {
         boost::asio::ip::tcp::endpoint endpoint(
             boost::asio::ip::address::from_string("127.0.0.1"), port);
         socket_.connect(endpoint);
@@ -32,7 +32,6 @@ public:
 
 private:
     boost::asio::ip::tcp::socket socket_;
-    std::vector<std::unique_ptr<Packet>> responses_;
 };
 
 inline const char* packetTypeToString(PacketType type) {
