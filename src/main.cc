@@ -1,12 +1,11 @@
-#include <iostream>
 #include <thread>
 #include <chrono>
 #include <vector>
 #include <atomic>
 #include <boost/asio.hpp>
-#include "chatserver.h"
-#include "chatclient.h"
-#include "format.hh"
+#include "chat_example/chatserver.h"
+#include "chat_example/chatclient.h"
+#include "chat_example/format.hh"
 
 void run_server(short port, std::atomic<bool>& stop_flag) {
     try {
