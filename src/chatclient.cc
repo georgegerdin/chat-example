@@ -1,9 +1,7 @@
 #include "chatclient.h"
 #include "packet.hh"
 #include "format.hh"
-#include <iostream>
 #include <thread>
-#include <chrono>
 #include <boost/asio.hpp>
 
 ChatClient::ChatClient(const std::string& name)
@@ -60,7 +58,7 @@ void ChatClient::connect(const std::string& host, const std::string& port) {
         boost::asio::async_connect(socket_, endpoints,
                                    [this](const boost::system::error_code& ec, const boost::asio::ip::tcp::endpoint&) {
                                        if (!ec) {
-                                           ////dbgln("[CLIENT {}] Connected to server", name_);
+                                           //dbgln("[CLIENT {}] Connected to server", name_);
                                            on_connected.emit();
                                            do_read_header();
                                        } else {
