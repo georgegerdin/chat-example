@@ -11,7 +11,8 @@ void run_server(short port, std::atomic<bool>& stop_flag) {
     try {
         dbgln("[MAIN] Starting server thread");
         boost::asio::io_context io_context;
-        ChatServer server(io_context, port);
+        auto db_adapter = std::make_shared<InMemoryDatabaseAdapter>(io_context);
+        ChatServer server(io_context, port, db_adapter);
         dbgln("[MAIN] Server thread started");
 
         std::thread io_thread([&io_context]() {

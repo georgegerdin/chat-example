@@ -50,7 +50,8 @@ inline const char* packetTypeToString(PacketType type) {
 TEST_CASE("ChatServer tests") {
     const short TEST_PORT = 12346;
     boost::asio::io_context io_context;
-    ChatServer server(io_context, TEST_PORT);
+    auto db_adapter = std::make_shared<InMemoryDatabaseAdapter>(io_context);
+    ChatServer server(io_context, TEST_PORT, db_adapter);
 
     std::thread server_thread([&io_context]() {
         io_context.run();
@@ -159,7 +160,8 @@ TEST_CASE("ChatServer tests") {
 TEST_CASE("ChatServer error handling") {
     const short TEST_PORT = 12347;
     boost::asio::io_context io_context;
-    ChatServer server(io_context, TEST_PORT);
+    auto db_adapter = std::make_shared<InMemoryDatabaseAdapter>(io_context);
+    ChatServer server(io_context, TEST_PORT, db_adapter);
 
     std::thread server_thread([&io_context]() {
         io_context.run();

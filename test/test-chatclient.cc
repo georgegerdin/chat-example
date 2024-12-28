@@ -105,7 +105,8 @@ public:
 TEST_CASE("ChatClient basic functionality") {
     const short TEST_PORT = 12345;
     boost::asio::io_context io_context;
-    ChatServer server(io_context, TEST_PORT);
+    auto db_adapter = std::make_shared<InMemoryDatabaseAdapter>(io_context);
+    ChatServer server(io_context, TEST_PORT, db_adapter);
 
     std::thread server_thread([&io_context]() {
         io_context.run();
@@ -189,7 +190,8 @@ TEST_CASE("ChatClient basic functionality") {
 TEST_CASE("ChatClient error handling") {
     const short TEST_PORT = 12345;
     boost::asio::io_context io_context;
-    ChatServer server(io_context, TEST_PORT);
+    auto db_adapter = std::make_shared<InMemoryDatabaseAdapter>(io_context);
+    ChatServer server(io_context, TEST_PORT, db_adapter);
 
     std::thread server_thread([&io_context]() {
         io_context.run();

@@ -2,10 +2,13 @@
 #include "packet.hh"
 #include "format.hh"
 
-ChatServer::ChatServer(boost::asio::io_context& io_context, short port)
+ChatServer::ChatServer(boost::asio::io_context& io_context,
+                       short port,
+                       std::shared_ptr<DatabaseAdapter> db_adapter)
     : io_context_(io_context),
     acceptor_(io_context, boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port)),
-    stop_flag_(false) {
+    stop_flag_(false),
+    db_adapter_(std::move(db_adapter)) {
     //dbgln("[SERVER] ChatServer constructor");
     do_accept();
     //dbgln("[SERVER] Server started on port {}", port);
@@ -34,7 +37,6 @@ void ChatServer::stop() {
     //dbgln("[SERVER] All participant sessions stopped");
     participants.clear();
     //dbgln("[SERVER] Participants cleared");
-    dump_accounts();
     //dbgln("[SERVER] Server stop completed");
 }
 
@@ -66,35 +68,38 @@ void ChatServer::handle_packet(std::shared_ptr<ChatSession> sender, const std::v
     switch (packet->getType()) {
     case PacketType::Login: {
         auto login_packet = static_cast<LoginPacket*>(packet.get());
-        //dbgln("[SERVER] Login attempt from user: {}", login_packet->getUsername());
+        authenticate_user(
+            login_packet->getUsername(),
+            login_packet->getPassword(),
+            [this, sender, username = login_packet->getUsername()](bool success) {
+                if (success) {
+                    sender->set_username(username);
+                    sender->deliver(LoginSuccessPacket());
 
-        bool success = authenticate_user(login_packet->getUsername(), login_packet->getPassword());
-        if (success) {
-            //dbgln("[SERVER] Login successful for user: {}", login_packet->getUsername());
-            sender->set_username(login_packet->getUsername());
-            sender->deliver(LoginSuccessPacket());
+                    // Send recent messages to newly logged-in user
+                    load_recent_messages(sender);
 
-            // Notify other users about the new user
-            ChatMessagePacket system_msg("System", login_packet->getUsername() + " has joined the chat.");
-            broadcast(system_msg, sender);
-        } else {
-            //dbgln("[SERVER] Login failed for user: {}", login_packet->getUsername());
-            sender->deliver(LoginFailedPacket());
-        }
+                    // Notify others
+                    ChatMessagePacket system_msg("System", username + " has joined the chat.");
+                    broadcast(system_msg, sender);
+                } else {
+                    sender->deliver(LoginFailedPacket());
+                }
+            });
         break;
     }
     case PacketType::CreateUser: {
         auto create_user_packet = static_cast<CreateUserPacket*>(packet.get());
-        //dbgln("[SERVER] Account creation attempt for username: {}", create_user_packet->getUsername());
-
-        bool success = create_user(create_user_packet->getUsername(), create_user_packet->getPassword());
-        if (success) {
-            //dbgln("[SERVER] Account created successfully for user: {}", create_user_packet->getUsername());
-            sender->deliver(AccountCreatedPacket());
-        } else {
-            //dbgln("[SERVER] Account creation failed for user: {} (username already exists)", create_user_packet->getUsername());
-            sender->deliver(AccountExistsPacket());
-        }
+        create_user(
+            create_user_packet->getUsername(),
+            create_user_packet->getPassword(),
+            [this, sender](bool success) {
+                if (success) {
+                    sender->deliver(AccountCreatedPacket());
+                } else {
+                    sender->deliver(AccountExistsPacket());
+                }
+            });
         break;
     }
     case PacketType::ChatMessage: {
@@ -102,16 +107,19 @@ void ChatServer::handle_packet(std::shared_ptr<ChatSession> sender, const std::v
         std::string sender_name = sender->get_username();
 
         if (sender_name.empty()) {
-            //dbgln("[SERVER] Received chat message from unauthenticated user");
             sender->deliver(LoginFailedPacket());
             return;
         }
 
-        //dbgln("[SERVER] Received chat message from {}: {}", sender_name, chat_message_packet->getMessage());
-
-        // Create a new packet with the sender's name
-        ChatMessagePacket broadcast_packet(sender_name, chat_message_packet->getMessage());
-        broadcast(broadcast_packet, sender);
+        // Store message in database
+        ChatMessage msg(sender_name, chat_message_packet->getMessage());
+        db_adapter_->storeMessage(msg, [this, sender, msg](bool success) {
+            if (success) {
+                // Create a new packet with the sender's name and message from msg
+                ChatMessagePacket broadcast_packet(msg.sender, msg.content);
+                broadcast(broadcast_packet, sender);
+            }
+        });
         break;
     }
     case PacketType::LoginSuccess:
@@ -134,34 +142,25 @@ void ChatServer::broadcast(const Packet& packet, std::shared_ptr<ChatSession> se
     }
 }
 
-bool ChatServer::authenticate_user(const std::string& username, const std::string& password) {
-    //dbgln("[SERVER] Attempting to authenticate user: {}", username);
-    auto it = user_credentials_.find(username);
-    if (it != user_credentials_.end() && it->second == password) {
-        //dbgln("[SERVER] Authentication successful for user: {}", username);
-        return true;
-    }
-    //dbgln("[SERVER] Authentication failed for user: {}", username);
-    return false;
+void ChatServer::authenticate_user(const std::string& username,
+                                   const std::string& password,
+                                   std::function<void(bool)> callback) {
+    db_adapter_->authenticateUser(username, password, callback);
 }
 
-bool ChatServer::create_user(const std::string& username, const std::string& password) {
-    //dbgln("[SERVER] Attempting to create user: {}", username);
-    if (user_credentials_.find(username) == user_credentials_.end()) {
-        user_credentials_[username] = password;
-        //dbgln("[SERVER] User created successfully: {}", username);
-        return true;
-    }
-    //dbgln("[SERVER] User creation failed: username already exists: {}", username);
-    return false;
+void ChatServer::create_user(const std::string& username,
+                             const std::string& password,
+                             std::function<void(bool)> callback) {
+    db_adapter_->createUser(username, password, callback);
 }
 
-
-void ChatServer::dump_accounts() const {
-    //dbgln("[SERVER] Available accounts:");
-    for (const auto& account : user_credentials_) {
-        //dbgln("[SERVER] Username: {}, Password: {}", account.first, account.second);
-    }
+void ChatServer::load_recent_messages(std::shared_ptr<ChatSession> session) {
+    db_adapter_->getRecentMessages(50, [this, session](const std::vector<ChatMessage>& messages) {
+        for (const auto& msg : messages) {
+            ChatMessagePacket packet(msg.sender, msg.content);
+            session->deliver(packet);
+        }
+    });
 }
 
 void ChatServer::leave(std::shared_ptr<ChatSession> participant) {

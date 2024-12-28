@@ -9,6 +9,7 @@
 #include <deque>
 #include <atomic>
 #include "packet.hh"
+#include "databaseadapter.hh"
 
 class ChatServer;
 
@@ -37,22 +38,27 @@ private:
 
 class ChatServer {
 public:
-    ChatServer(boost::asio::io_context& io_context, short port);
+    ChatServer(boost::asio::io_context& io_context, short port,
+               std::shared_ptr<DatabaseAdapter> db_adapter);
 
     void stop();
     void handle_packet(std::shared_ptr<ChatSession> sender, const std::vector<uint8_t>& packet_data);
     void broadcast(const Packet& packet, std::shared_ptr<ChatSession> sender);
     void leave(std::shared_ptr<ChatSession> participant);
-    void dump_accounts() const;
 
 private:
     void do_accept();
-    bool authenticate_user(const std::string& username, const std::string& password);
-    bool create_user(const std::string& username, const std::string& password);
+    void authenticate_user(const std::string& username,
+                           const std::string& password,
+                           std::function<void(bool)> callback);
+    void create_user(const std::string& username,
+                     const std::string& password,
+                     std::function<void(bool)> callback);
+    void load_recent_messages(std::shared_ptr<ChatSession> session);
 
     boost::asio::io_context& io_context_;
     boost::asio::ip::tcp::acceptor acceptor_;
     std::set<std::shared_ptr<ChatSession>> participants_;
     std::atomic<bool> stop_flag_;
-    std::unordered_map<std::string, std::string> user_credentials_;
+    std::shared_ptr<DatabaseAdapter> db_adapter_;
 };
